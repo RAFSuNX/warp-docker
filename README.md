@@ -1,8 +1,6 @@
 # warp-docker
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/caomingjun/warp)](https://hub.docker.com/r/caomingjun/warp)
-![WARP version in latest image](https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.caomingjun.com%2Fdockerhub-label%3Frepo%3Dcaomingjun%2Fwarp%26label%3DWARP_VERSION%26display%3DWARP%2520in%2520image)
-![GOST version in latest image](https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.caomingjun.com%2Fdockerhub-label%3Frepo%3Dcaomingjun%2Fwarp%26label%3DGOST_VERSION%26display%3DGOST%2520in%2520image)
+[![Build and Publish](https://github.com/RAFSuNX/warp-docker/actions/workflows/build-publish.yml/badge.svg)](https://github.com/RAFSuNX/warp-docker/actions/workflows/build-publish.yml)
 
 Run official [Cloudflare WARP](https://1.1.1.1/) client in Docker.
 
@@ -20,7 +18,7 @@ version: "3"
 
 services:
   warp:
-    image: caomingjun/warp
+    image: ghcr.io/rafsunx/warp-docker:latest
     container_name: warp
     restart: always
     # add removed rule back (https://github.com/opencontainers/runc/pull/3468)
@@ -82,7 +80,7 @@ You can also use the `latest` tag to use the latest version of the image.
 > You can access the image built by a certain commit by using the tag `{WARP_VERSION}-{GOST_VERSION}-{COMMIT_SHA}`. Not all commits have images built.
 
 > [!NOTE]
-> Not all version combinations are available. Do check [the list of tags in Docker Hub](https://hub.docker.com/r/caomingjun/warp/tags) before you use one. If the version you want is not available, you can [build your own image](#build).
+> Images are automatically built and published to GitHub Container Registry on every push to the main branch. You can view available tags at [ghcr.io/rafsunx/warp-docker](https://github.com/RAFSuNX/warp-docker/pkgs/container/warp-docker). If the version you want is not available, you can [build your own image](#build).
 
 #### EXPERIMENTAL: Debian slim variant
 
@@ -96,17 +94,16 @@ The slim variants use a smaller base image (`debian:bookworm-slim`) to reduce im
 
 ## Build
 
-You can use Github Actions to build the image yourself.
+Images are automatically built and published to GitHub Container Registry (ghcr.io) on every push to the main branch.
+
+If you want to build your own image:
 
 1. Fork this repository.
-2. Create necessary variables and secrets in the repository settings:
-   1. variable `REGISTRY`: for example, `docker.io` (Docker Hub)
-   2. variable `IMAGE_NAME`: for example, `caomingjun/warp`
-   3. variable `DOCKER_USERNAME`: for example, `caomingjun`
-   4. secret `DOCKER_PASSWORD`: generate a token in Docker Hub and fill in the token
-3. Manually trigger the workflow `Build and push image` in the Actions tab.
+2. Images will automatically build and publish to `ghcr.io/<your-username>/warp-docker` on every push to main.
+3. No additional configuration needed - GitHub Actions will use the built-in `GITHUB_TOKEN`.
+4. You can also manually trigger the workflow `Build and publish Docker image` in the Actions tab.
 
-This will build the image with the latest version of WARP client and GOST and push it to the specified registry. You can also specify the version of GOST by giving input to the workflow. Building image with custom WARP client version is not supported yet.
+This will build the image with the latest version of WARP client and GOST and push it to GitHub Container Registry. You can also specify the version of GOST by giving input to the workflow. Building image with custom WARP client version is not supported yet.
 
 If you want to build the image locally, you can use [`.github/workflows/build-publish.yml`](.github/workflows/build-publish.yml) as a reference.
 

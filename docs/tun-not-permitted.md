@@ -21,7 +21,7 @@ version: "3"
 
 services:
   warp:
-    image: caomingjun/warp
+    image: ghcr.io/rafsunx/warp-docker:latest
     container_name: warp
     restart: always
     # ===== Add the following 2 lines =====
@@ -63,7 +63,7 @@ version: "3"
 
 services:
   warp:
-    image: caomingjun/warp
+    image: ghcr.io/rafsunx/warp-docker:latest
     container_name: warp
     restart: always
     # ===== Add the following 2 lines =====

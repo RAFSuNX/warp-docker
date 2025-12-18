@@ -15,7 +15,7 @@ podman run -d \
   --sysctl net.ipv6.conf.all.disable_ipv6=0 \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   -v ./data:/var/lib/cloudflare-warp \
-  docker.io/caomingjun/warp:latest
+  ghcr.io/rafsunx/warp-docker:latest
 ```
 
 > [!NOTE]

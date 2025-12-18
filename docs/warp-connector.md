@@ -19,7 +19,7 @@ Sample Docker Compose File:
 ```yaml
 services:
   warp:
-    image: caomingjun/warp
+    image: ghcr.io/rafsunx/warp-docker:latest
     container_name: warp
     restart: always
     # add removed rule back (https://github.com/opencontainers/runc/pull/3468)
