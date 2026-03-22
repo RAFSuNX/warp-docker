@@ -25,40 +25,36 @@ sudo dbus-daemon --config-file=/usr/share/dbus-1/system.conf
 # start the daemon
 sudo warp-svc --accept-tos &
 
-# wait for the daemon to start, then verify it's responsive
+# wait for the daemon to start
 sleep "$WARP_SLEEP"
-WARP_REG_RETRIES="${WARP_REG_RETRIES:-10}"
-echo "Waiting for warp-svc to become ready..."
-retry=0
-while [ "$retry" -lt "$WARP_REG_RETRIES" ]; do
-    if warp-cli status 2>/dev/null | grep -qiE "Disconnected|Connected|Registration"; then
-        echo "warp-svc is ready"
-        break
-    fi
-    retry=$((retry + 1))
-    echo "  warp-svc not ready yet (attempt $retry/$WARP_REG_RETRIES)..."
-    sleep 3
+
+# wait for DNS to be resolvable (k3s CoreDNS may not be ready immediately)
+echo "Waiting for DNS readiness..."
+while ! nslookup cloudflareclient.com >/dev/null 2>&1; do
+    echo "  DNS not ready yet, retrying in 2s..."
+    sleep 2
 done
+echo "DNS is ready"
+
+# wait for warp-svc to respond to IPC
+echo "Waiting for warp-svc..."
+while ! warp-cli status >/dev/null 2>&1; do
+    sleep 1
+done
+echo "warp-svc is ready"
 
 # if /var/lib/cloudflare-warp/reg.json not exists, setup new warp client
 if [ ! -f /var/lib/cloudflare-warp/reg.json ]; then
     # if /var/lib/cloudflare-warp/mdm.xml not exists or REGISTER_WHEN_MDM_EXISTS not empty, register the warp client
     if [ ! -f /var/lib/cloudflare-warp/mdm.xml ] || [ -n "$REGISTER_WHEN_MDM_EXISTS" ]; then
         echo "Registering WARP client..."
-        retry=0
-        while [ "$retry" -lt "$WARP_REG_RETRIES" ]; do
-            if warp-cli registration new 2>&1; then
-                echo "Warp client registered!"
-                break
-            fi
-            retry=$((retry + 1))
-            echo "  Registration attempt $retry/$WARP_REG_RETRIES failed, retrying in 5s..."
-            sleep 5
+        warp-cli registration new
+        # registration is async — wait for daemon to finalize it
+        echo "Waiting for registration to finalize..."
+        while ! warp-cli registration show >/dev/null 2>&1; do
+            sleep 1
         done
-        if [ "$retry" -eq "$WARP_REG_RETRIES" ]; then
-            echo "ERROR: Failed to register after $WARP_REG_RETRIES attempts"
-            exit 1
-        fi
+        echo "Warp client registered!"
         # if a license key is provided, register the license
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "License key found, registering license..."
@@ -81,7 +77,11 @@ if [ -n "$WARP_PROTOCOL" ]; then
     # disconnect first in case daemon auto-connected with wrong protocol
     warp-cli --accept-tos disconnect 2>/dev/null || true
     sleep 1
-    warp-cli tunnel protocol set "$WARP_PROTOCOL"
+    # retry protocol set in case registration is still finalizing
+    while ! warp-cli tunnel protocol set "$WARP_PROTOCOL" 2>&1; do
+        echo "  Protocol set failed (registration may still be finalizing), retrying in 2s..."
+        sleep 2
+    done
 fi
 
 # set up kill switch before connecting (blocks non-VPN traffic via nftables)
