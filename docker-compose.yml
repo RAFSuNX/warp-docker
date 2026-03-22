@@ -12,20 +12,22 @@ services:
       - "1080:1080"
     environment:
       - WARP_SLEEP=2
-      # - WARP_LICENSE_KEY= # optional
-      # - WARP_ENABLE_NAT=1 # enable nat
+      # - WARP_PROTOCOL=wireguard # set tunnel protocol (wireguard or masque)
+      # - WARP_KILL_SWITCH=1      # block non-VPN traffic when WARP disconnects
+      # - WARP_WATCHDOG=1         # auto-reconnect on disconnect
+      # - WARP_LICENSE_KEY=       # optional
+      # - WARP_ENABLE_NAT=1      # enable nat
     cap_add:
       # Docker already have them, these are for podman users
       - MKNOD
       - AUDIT_WRITE
       # additional required cap for warp, both for podman and docker
       - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-      # uncomment for nat
-      # - net.ipv4.ip_forward=1
-      # - net.ipv6.conf.all.forwarding=1
-      # - net.ipv6.conf.all.accept_ra=2
+    # sysctls are now set inside the container automatically.
+    # uncomment only if you need to override or add extras:
+    # sysctls:
+      # - net.ipv4.ip_forward=1          # for nat
+      # - net.ipv6.conf.all.forwarding=1  # for nat
+      # - net.ipv6.conf.all.accept_ra=2   # for nat
     volumes:
       - ./data:/var/lib/cloudflare-warp

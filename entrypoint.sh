@@ -11,6 +11,10 @@ if [ ! -e /dev/net/tun ]; then
     sudo chmod 600 /dev/net/tun
 fi
 
+# set required sysctls inside the container (avoids needing sysctl in pod spec / compose)
+sudo sysctl -w net.ipv4.conf.all.src_valid_mark=1 2>/dev/null || true
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
+
 # start dbus
 sudo mkdir -p /run/dbus
 if [ -f /run/dbus/pid ]; then
@@ -35,11 +39,88 @@ if [ ! -f /var/lib/cloudflare-warp/reg.json ]; then
             warp-cli registration license "$WARP_LICENSE_KEY" && echo "Warp license registered!"
         fi
     fi
-    # connect to the warp server
-    warp-cli --accept-tos connect
 else
     echo "Warp client already registered, skip registration"
 fi
+
+# set tunnel protocol if specified (e.g., "WireGuard" to avoid MASQUE issues on Oracle Cloud)
+# accepted values: WireGuard, MASQUE (case-insensitive)
+if [ -n "$WARP_PROTOCOL" ]; then
+    # normalize common casings to what warp-cli expects
+    case "$(echo "$WARP_PROTOCOL" | tr '[:upper:]' '[:lower:]')" in
+        wireguard) WARP_PROTOCOL="WireGuard" ;;
+        masque)    WARP_PROTOCOL="MASQUE" ;;
+    esac
+    echo "Setting tunnel protocol to ${WARP_PROTOCOL}..."
+    # disconnect first in case daemon auto-connected with wrong protocol
+    warp-cli --accept-tos disconnect 2>/dev/null || true
+    sleep 1
+    warp-cli tunnel protocol set "$WARP_PROTOCOL"
+fi
+
+# set up kill switch before connecting (blocks non-VPN traffic via nftables)
+if [ -n "$WARP_KILL_SWITCH" ]; then
+    echo "[kill-switch] Setting up kill switch..."
+
+    # detect local/container networks to whitelist
+    LOCAL_NETS=$(ip --json address | jq -r '
+        .[] |
+        select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
+        .addr_info[] |
+        select(.family == "inet") |
+        "\(.local)/\(.prefixlen)"' | while read -r cidr; do
+            if echo "$cidr" | grep -q "/32$"; then
+                echo "$cidr"
+            else
+                ipcalc -n "$cidr" | grep Network | awk '{print $2}'
+            fi
+        done)
+
+    LOCAL_NETS6=$(ip --json address | jq -r '
+        .[] |
+        select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
+        .addr_info[] |
+        select(.family == "inet6" and (.scope != "link")) |
+        "\(.local)/\(.prefixlen)"')
+
+    sudo nft add table inet kill_switch
+
+    # output chain: traffic originating from this container
+    sudo nft add chain inet kill_switch output { type filter hook output priority 0 \; policy drop \; }
+    sudo nft add rule inet kill_switch output oifname "lo" accept
+    sudo nft add rule inet kill_switch output oifname "CloudflareWARP" accept
+    # allow warp-svc (root) to reach Cloudflare servers for tunnel establishment
+    sudo nft add rule inet kill_switch output meta skuid 0 accept
+    for net in $LOCAL_NETS; do
+        sudo nft add rule inet kill_switch output ip daddr "$net" accept
+    done
+    for net6 in $LOCAL_NETS6; do
+        sudo nft add rule inet kill_switch output ip6 daddr "$net6" accept
+    done
+    # allow IPv6 link-local (NDP, router discovery)
+    sudo nft add rule inet kill_switch output ip6 daddr fe80::/10 accept
+
+    # forward chain: traffic routed through this container (NAT gateway / sidecar mode)
+    sudo nft add chain inet kill_switch forward { type filter hook forward priority 0 \; policy drop \; }
+    sudo nft add rule inet kill_switch forward oifname "CloudflareWARP" accept
+    sudo nft add rule inet kill_switch forward ct state established,related accept
+    for net in $LOCAL_NETS; do
+        sudo nft add rule inet kill_switch forward ip daddr "$net" accept
+    done
+    for net6 in $LOCAL_NETS6; do
+        sudo nft add rule inet kill_switch forward ip6 daddr "$net6" accept
+    done
+    sudo nft add rule inet kill_switch forward ip6 daddr fe80::/10 accept
+
+    echo "[kill-switch] Kill switch active. Non-VPN traffic blocked."
+fi
+
+# connect to WARP
+echo "Connecting to WARP..."
+warp-cli --accept-tos connect
+
+# wait for connection to stabilize
+sleep "$WARP_SLEEP"
 
 # disable qlog if DEBUG_ENABLE_QLOG is empty
 if [ -z "$DEBUG_ENABLE_QLOG" ]; then
@@ -73,6 +154,12 @@ if [ -n "$WARP_ENABLE_NAT" ]; then
     sudo nft add table ip6 mangle
     sudo nft add chain ip6 mangle forward { type filter hook forward priority mangle \; }
     sudo nft add rule ip6 mangle forward tcp flags syn tcp option maxseg size set rt mtu
+fi
+
+# start watchdog if enabled
+if [ -n "$WARP_WATCHDOG" ]; then
+    /watchdog.sh &
+    echo "[watchdog] Connection watchdog started (interval: ${WARP_WATCHDOG_INTERVAL:-30}s)"
 fi
 
 # start the proxy

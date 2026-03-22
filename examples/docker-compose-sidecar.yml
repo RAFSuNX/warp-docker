@@ -1,0 +1,51 @@
+# WARP VPN Sidecar Pattern
+#
+# Other containers share WARP's network namespace via network_mode,
+# so all their traffic routes through the VPN tunnel automatically.
+# No proxy configuration needed — routing is handled at the network level.
+#
+# The kill switch ensures traffic is blocked (not leaked to eth0)
+# when WARP disconnects. The watchdog auto-reconnects.
+#
+# Required sysctls are set inside the container automatically.
+#
+# Ports for sidecar containers must be declared on the warp service
+# since they share its network namespace.
+
+version: "3"
+
+services:
+  warp:
+    image: ghcr.io/rafsunx/warp-docker:latest
+    container_name: warp
+    restart: always
+    device_cgroup_rules:
+      - 'c 10:200 rwm'
+    ports:
+      - "1080:1080"   # GOST proxy
+      # Declare sidecar container ports here:
+      # - "9091:9091"  # e.g. Transmission web UI
+      # - "8080:8080"  # e.g. your app
+    environment:
+      - WARP_SLEEP=2
+      - WARP_PROTOCOL=wireguard
+      - WARP_KILL_SWITCH=1
+      - WARP_WATCHDOG=1
+      # - WARP_LICENSE_KEY=
+    cap_add:
+      - MKNOD
+      - AUDIT_WRITE
+      - NET_ADMIN
+    volumes:
+      - ./data:/var/lib/cloudflare-warp
+
+  # Example sidecar: shares WARP's network namespace.
+  # All traffic from this container routes through the VPN tunnel.
+  # Replace with your actual application (e.g. linuxserver/transmission).
+  app:
+    image: alpine:latest
+    network_mode: "service:warp"
+    depends_on:
+      warp:
+        condition: service_healthy
+    command: ["sleep", "infinity"]

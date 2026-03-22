@@ -14,6 +14,7 @@ LABEL GOST_VERSION=${GOST_VERSION}
 LABEL COMMIT_SHA=${COMMIT_SHA}
 
 COPY entrypoint.sh /entrypoint.sh
+COPY watchdog.sh /watchdog.sh
 COPY ./healthcheck /healthcheck
 
 # install dependencies
@@ -55,6 +56,7 @@ RUN case ${TARGETPLATFORM} in \
     fi && \
     chmod +x /usr/bin/gost && \
     chmod +x /entrypoint.sh && \
+    chmod +x /watchdog.sh && \
     chmod +x /healthcheck/index.sh && \
     useradd -m -s /bin/bash warp && \
     echo "warp ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/warp
@@ -71,6 +73,11 @@ ENV REGISTER_WHEN_MDM_EXISTS=
 ENV WARP_LICENSE_KEY=
 ENV BETA_FIX_HOST_CONNECTIVITY=
 ENV WARP_ENABLE_NAT=
+ENV WARP_PROTOCOL=
+ENV WARP_KILL_SWITCH=
+ENV WARP_WATCHDOG=
+ENV WARP_WATCHDOG_INTERVAL=30
+ENV WARP_WATCHDOG_MAX_RETRIES=5
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
   CMD /healthcheck/index.sh

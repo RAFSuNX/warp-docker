@@ -1,0 +1,155 @@
+# WARP VPN sidecar for k3s — direct tunnel routing, no SOCKS proxy.
+#
+# All containers share the pod network namespace. WARP creates a
+# CloudflareWARP tunnel interface and routes all pod traffic through
+# it at the network level. No proxy configuration needed.
+#
+# Kill switch blocks traffic if WARP drops. Watchdog auto-reconnects.
+# Sysctls are set inside the container — no pod-level sysctls required.
+#
+# Usage:
+#   kubectl apply -f examples/k3s-pod.yaml
+#   kubectl port-forward pod/vpn-workload 9091:9091  # access Transmission UI
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vpn
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: warp-data
+  namespace: vpn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: transmission-config
+  namespace: vpn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: transmission-downloads
+  namespace: vpn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vpn-workload
+  namespace: vpn
+  labels:
+    app: vpn-workload
+spec:
+  containers:
+    # WARP VPN sidecar — creates the tunnel interface for the whole pod.
+    # Traffic routes through CloudflareWARP at the network level (not proxy).
+    - name: warp
+      image: ghcr.io/rafsunx/warp-docker:latest
+      env:
+        - name: WARP_PROTOCOL
+          value: WireGuard
+        - name: WARP_KILL_SWITCH
+          value: "1"
+        - name: WARP_WATCHDOG
+          value: "1"
+        - name: WARP_SLEEP
+          value: "3"
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN", "MKNOD"]
+      volumeMounts:
+        - name: warp-data
+          mountPath: /var/lib/cloudflare-warp
+        - name: tun-device
+          mountPath: /dev/net/tun
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "256Mi"
+          cpu: "500m"
+      readinessProbe:
+        exec:
+          command: ["/healthcheck/index.sh"]
+        initialDelaySeconds: 15
+        periodSeconds: 15
+      livenessProbe:
+        exec:
+          command: ["/healthcheck/index.sh"]
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        failureThreshold: 3
+
+    # Transmission — all traffic routes through the VPN tunnel automatically.
+    # No proxy env vars needed. The CloudflareWARP interface handles routing.
+    - name: transmission
+      image: linuxserver/transmission:latest
+      env:
+        - name: PUID
+          value: "1000"
+        - name: PGID
+          value: "1000"
+      ports:
+        - containerPort: 9091
+          name: web-ui
+        - containerPort: 51413
+          name: peer-tcp
+        - containerPort: 51413
+          name: peer-udp
+          protocol: UDP
+      volumeMounts:
+        - name: transmission-config
+          mountPath: /config
+        - name: transmission-downloads
+          mountPath: /downloads
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+
+  volumes:
+    - name: warp-data
+      persistentVolumeClaim:
+        claimName: warp-data
+    - name: transmission-config
+      persistentVolumeClaim:
+        claimName: transmission-config
+    - name: transmission-downloads
+      persistentVolumeClaim:
+        claimName: transmission-downloads
+    - name: tun-device
+      hostPath:
+        path: /dev/net/tun
+        type: CharDevice
