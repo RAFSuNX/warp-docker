@@ -25,14 +25,40 @@ sudo dbus-daemon --config-file=/usr/share/dbus-1/system.conf
 # start the daemon
 sudo warp-svc --accept-tos &
 
-# sleep to wait for the daemon to start, default 2 seconds
+# wait for the daemon to start, then verify it's responsive
 sleep "$WARP_SLEEP"
+WARP_REG_RETRIES="${WARP_REG_RETRIES:-10}"
+echo "Waiting for warp-svc to become ready..."
+retry=0
+while [ "$retry" -lt "$WARP_REG_RETRIES" ]; do
+    if warp-cli status 2>/dev/null | grep -qiE "Disconnected|Connected|Registration"; then
+        echo "warp-svc is ready"
+        break
+    fi
+    retry=$((retry + 1))
+    echo "  warp-svc not ready yet (attempt $retry/$WARP_REG_RETRIES)..."
+    sleep 3
+done
 
 # if /var/lib/cloudflare-warp/reg.json not exists, setup new warp client
 if [ ! -f /var/lib/cloudflare-warp/reg.json ]; then
     # if /var/lib/cloudflare-warp/mdm.xml not exists or REGISTER_WHEN_MDM_EXISTS not empty, register the warp client
     if [ ! -f /var/lib/cloudflare-warp/mdm.xml ] || [ -n "$REGISTER_WHEN_MDM_EXISTS" ]; then
-        warp-cli registration new && echo "Warp client registered!"
+        echo "Registering WARP client..."
+        retry=0
+        while [ "$retry" -lt "$WARP_REG_RETRIES" ]; do
+            if warp-cli registration new 2>&1; then
+                echo "Warp client registered!"
+                break
+            fi
+            retry=$((retry + 1))
+            echo "  Registration attempt $retry/$WARP_REG_RETRIES failed, retrying in 5s..."
+            sleep 5
+        done
+        if [ "$retry" -eq "$WARP_REG_RETRIES" ]; then
+            echo "ERROR: Failed to register after $WARP_REG_RETRIES attempts"
+            exit 1
+        fi
         # if a license key is provided, register the license
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "License key found, registering license..."
