@@ -16,16 +16,62 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      gost-version: ${{ steps.gost.outputs.GOST_VERSION }}
+      warp-version: ${{ steps.warp.outputs.WARP_VERSION }}
+    steps:
+      - name: Get gost version
+        id: gost
+        run: |
+          if [ -z "${{ github.event.inputs.GOST_VERSION }}" ]; then
+            echo "GOST_VERSION=$(curl -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' -s https://api.github.com/repos/ginuerzh/gost/releases/latest | jq -r '.tag_name' | cut -c 2-)" >> "$GITHUB_OUTPUT"
+          else
+            echo "GOST_VERSION=${{ github.event.inputs.GOST_VERSION }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify gost version
+        run: |
+          if [[ ! "${{ steps.gost.outputs.GOST_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid gost version: ${{ steps.gost.outputs.GOST_VERSION }}"
+            exit 1
+          fi
+
+      - name: Get WARP client version
+        id: warp
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          echo "WARP_VERSION=$(apt-cache show cloudflare-warp | grep '^Version:' | awk '{print $2}' | sed 's/-[0-9]*$//')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        variant: [standard, slim]
+        include:
+          - variant: standard
+            base_image: ubuntu:22.04
+            tag_prefix: ""
+          - variant: slim
+            base_image: debian:bookworm-slim
+            tag_prefix: "slim-"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set platform pair
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -37,60 +83,70 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get gost version
-        id: get-gost-version
-        run: |
-          if [ -z "${{ github.event.inputs.GOST_VERSION }}" ]; then
-            echo "GOST_VERSION=$(curl -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' -s https://api.github.com/repos/ginuerzh/gost/releases/latest | jq -r '.tag_name' | cut -c 2-)" >> "$GITHUB_OUTPUT"
-          else
-            echo "GOST_VERSION=${{ github.event.inputs.GOST_VERSION }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # gost version must be <number>.<number>.<number>
-      - name: Verify gost version
-        id: verify-gost-version
-        run: |
-          if [[ ! "${{ steps.get-gost-version.outputs.GOST_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid gost version: ${{ steps.get-gost-version.outputs.GOST_VERSION }}"
-            exit 1
-          fi
-
-      - name: Get WARP client version
-        id: get-warp-client-version
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          echo "WARP_VERSION=$(apt-cache show cloudflare-warp | grep '^Version:' | awk '{print $2}' | sed 's/-[0-9]*$//')" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v5
         with:
-          build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
-            COMMIT_SHA=${{ github.sha }}
-            
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/rafsunx/warp-docker:latest
-            ghcr.io/rafsunx/warp-docker:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ghcr.io/rafsunx/warp-docker:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            GOST_VERSION=${{ needs.prepare.outputs.gost-version }}
+            WARP_VERSION=${{ needs.prepare.outputs.warp-version }}
+            COMMIT_SHA=${{ github.sha }}
+            BASE_IMAGE=${{ matrix.base_image }}
+          outputs: type=image,name=ghcr.io/rafsunx/warp-docker,push-by-digest=true,name-canonical=true,push=true
 
-      - name: Build and push slim variant
-        uses: docker/build-push-action@v5
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
         with:
-          build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
-            COMMIT_SHA=${{ github.sha }}
-            BASE_IMAGE=debian:bookworm-slim
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/rafsunx/warp-docker:slim-latest
-            ghcr.io/rafsunx/warp-docker:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ghcr.io/rafsunx/warp-docker:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
+          name: digest-${{ matrix.variant }}-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [standard, slim]
+        include:
+          - variant: standard
+            tag_prefix: ""
+          - variant: slim
+            tag_prefix: "slim-"
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.variant }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          WARP_VERSION="${{ needs.prepare.outputs.warp-version }}"
+          GOST_VERSION="${{ needs.prepare.outputs.gost-version }}"
+          PREFIX="${{ matrix.tag_prefix }}"
+          docker buildx imagetools create \
+            -t "ghcr.io/rafsunx/warp-docker:${PREFIX}latest" \
+            -t "ghcr.io/rafsunx/warp-docker:${PREFIX}${WARP_VERSION}-${GOST_VERSION}" \
+            -t "ghcr.io/rafsunx/warp-docker:${PREFIX}${WARP_VERSION}-${GOST_VERSION}-${{ github.sha }}" \
+            $(printf 'ghcr.io/rafsunx/warp-docker@sha256:%s ' *)
