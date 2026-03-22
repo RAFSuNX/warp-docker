@@ -15,6 +15,10 @@ fi
 sudo sysctl -w net.ipv4.conf.all.src_valid_mark=1 2>/dev/null || true
 sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
 
+# ensure eth0 MTU is large enough for WARP WireGuard (needs >= 1340)
+# Flannel-over-Tailscale can set eth0 to 1230 which is too small
+sudo ip link set eth0 mtu 1400 2>/dev/null || true
+
 # start dbus
 sudo mkdir -p /run/dbus
 if [ -f /run/dbus/pid ]; then
@@ -49,10 +53,10 @@ if [ ! -f /var/lib/cloudflare-warp/reg.json ]; then
     if [ ! -f /var/lib/cloudflare-warp/mdm.xml ] || [ -n "$REGISTER_WHEN_MDM_EXISTS" ]; then
         echo "Registering WARP client..."
         warp-cli registration new
-        # registration is async — wait for daemon to finalize it
+        # registration is async — daemon processes it in the background
         echo "Waiting for registration to finalize..."
-        while ! warp-cli registration show >/dev/null 2>&1; do
-            sleep 1
+        for i in $(seq 1 15); do
+            warp-cli status 2>&1 | grep -v "Registration Missing" && break || sleep 2
         done
         echo "Warp client registered!"
         # if a license key is provided, register the license
