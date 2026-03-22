@@ -30,7 +30,7 @@ sleep "$WARP_SLEEP"
 
 # wait for DNS to be resolvable (k3s CoreDNS may not be ready immediately)
 echo "Waiting for DNS readiness..."
-while ! nslookup cloudflareclient.com >/dev/null 2>&1; do
+while ! getent hosts cloudflareclient.com >/dev/null 2>&1; do
     echo "  DNS not ready yet, retrying in 2s..."
     sleep 2
 done
