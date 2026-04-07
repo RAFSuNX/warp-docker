@@ -82,6 +82,9 @@ spec:
           value: "1"
         - name: K3S_SERVICE_CIDR
           value: "10.43.0.0/16"
+        # Optional: bypass specific endpoints that fail over WARP egress (example tracker IP)
+        # - name: WARP_DIRECT_EXCLUDE_CIDRS
+        #   value: "87.98.169.140/32"
         - name: WARP_CLEAR_EXCLUSIONS
           value: "1"
         - name: WARP_SLEEP

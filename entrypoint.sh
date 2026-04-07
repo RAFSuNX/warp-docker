@@ -9,6 +9,51 @@ WARP_SVC_WAIT_TIMEOUT="${WARP_SVC_WAIT_TIMEOUT:-120}"
 WARP_CONNECT_RETRIES="${WARP_CONNECT_RETRIES:-5}"
 WARP_PROTOCOL_SET_MAX_RETRIES="${WARP_PROTOCOL_SET_MAX_RETRIES:-30}"
 
+apply_direct_excludes() {
+    local exclude_csv="${WARP_DIRECT_EXCLUDE_CIDRS:-}"
+    if [ -z "$exclude_csv" ]; then
+        return
+    fi
+
+    echo "[direct-exclude] Applying direct route exclusions..."
+    IFS=',' read -ra CIDRS <<< "$exclude_csv"
+    for raw_cidr in "${CIDRS[@]}"; do
+        cidr="$(echo "$raw_cidr" | tr -d ' ')"
+        if [ -z "$cidr" ]; then
+            continue
+        fi
+
+        if echo "$cidr" | grep -q ":"; then
+            family="ip6"
+        else
+            family="ip"
+        fi
+
+        echo "[direct-exclude] Excluding $cidr from WARP tunnel routing"
+        warp-cli tunnel ip add "$cidr" 2>/dev/null || true
+
+        # Allow excluded destinations in Cloudflare's own output firewall table.
+        # Retry because cloudflare-warp table may appear slightly after connect.
+        added_cf_rule=0
+        for _ in $(seq 1 15); do
+            if sudo nft add rule inet cloudflare-warp output "$family" daddr "$cidr" accept 2>/dev/null; then
+                added_cf_rule=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$added_cf_rule" -ne 1 ]; then
+            echo "[direct-exclude] WARNING: failed to add cloudflare-warp output allow for $cidr"
+        fi
+
+        # If kill switch is enabled, allow excluded destinations there too.
+        if [ -n "$WARP_KILL_SWITCH" ]; then
+            sudo nft add rule inet kill_switch output "$family" daddr "$cidr" accept 2>/dev/null || true
+            sudo nft add rule inet kill_switch forward "$family" daddr "$cidr" accept 2>/dev/null || true
+        fi
+    done
+}
+
 # create a tun device if not exist
 # allow passing device to ensure compatibility with Podman
 if [ ! -e /dev/net/tun ]; then
@@ -251,6 +296,9 @@ if [ -n "$WARP_CLEAR_EXCLUSIONS" ]; then
     warp-cli tunnel ip reset 2>/dev/null || true
     echo "[exclusions] IP exclusions cleared"
 fi
+
+# Add explicit direct-route exclusions (for trackers/endpoints that fail on WARP egress).
+apply_direct_excludes
 
 # disable qlog if DEBUG_ENABLE_QLOG is empty
 if [ -z "$DEBUG_ENABLE_QLOG" ]; then

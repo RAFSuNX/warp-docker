@@ -71,6 +71,7 @@ You can configure the container through the following environment variables:
 - `FORCE_IPV4`: If set, will disable IPv6 and force IPv4 preference for all connections. Recommended for environments with IPv6 issues.
 - `K3S_SERVICE_CIDR`: The Kubernetes/k3s service network CIDR to allow through the kill switch (e.g., `10.43.0.0/16`). Only used when `WARP_KILL_SWITCH` is enabled.
 - `KILL_SWITCH_ALLOW_CIDRS`: Comma-separated list of additional CIDRs to allow through the kill switch (e.g., `192.168.1.0/24,10.0.0.0/8`).
+- `WARP_DIRECT_EXCLUDE_CIDRS`: Comma-separated CIDRs/IPs to bypass WARP tunnel routing (for endpoints that fail over WARP egress, such as some private trackers). These are added to `warp-cli tunnel ip` exclusions and allowed in nft output rules on startup.
 - `WARP_PROTOCOL`: Force a specific tunnel protocol. Accepted values: `WireGuard`, `MASQUE`. Useful for environments where MASQUE has issues (e.g., Oracle Cloud).
 - `WARP_DNS_CHECK_HOST`: DNS hostname used for startup readiness checks (default: `cloudflareclient.com`).
 - `WARP_DNS_WAIT_TIMEOUT`: Max seconds to wait for DNS readiness before startup fails (default: `120`).
