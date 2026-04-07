@@ -2,11 +2,21 @@
 # All qBittorrent traffic is routed through Cloudflare WARP
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: media
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: qbittorrent-config
   namespace: media
 spec:
+  storageClassName: local-path
   accessModes:
   - ReadWriteOnce
   resources:
@@ -19,6 +29,20 @@ metadata:
   name: warp-state
   namespace: media
 spec:
+  storageClassName: local-path
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qbittorrent-downloads
+  namespace: media
+spec:
+  storageClassName: local-path
   accessModes:
   - ReadWriteOnce
   resources:
@@ -51,6 +75,8 @@ spec:
         - name: WARP_ENABLE_NAT
           value: "1"
         - name: WARP_KILL_SWITCH
+          value: "1"
+        - name: WARP_KILL_SWITCH_STRICT
           value: "1"
         - name: FORCE_IPV4
           value: "1"
@@ -106,6 +132,14 @@ spec:
       - name: qbittorrent
         image: linuxserver/qbittorrent:latest
         imagePullPolicy: Always
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: PUID
           value: "1000"
@@ -139,9 +173,8 @@ spec:
           path: /dev/net/tun
           type: CharDevice
       - name: downloads
-        hostPath:
-          path: /mnt/storage/Downloads
-          type: Directory
+        persistentVolumeClaim:
+          claimName: qbittorrent-downloads
 ---
 apiVersion: v1
 kind: Service

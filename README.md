@@ -66,13 +66,21 @@ You can configure the container through the following environment variables:
 - `BETA_FIX_HOST_CONNECTIVITY`: If set, will add checks for host connectivity into healthchecks and automatically fix it if necessary. See [host connectivity issue](docs/host-connectivity.md) for more information.
 - `WARP_ENABLE_NAT`: If set, will work as warp mode and turn NAT on. You can route L3 traffic through `warp-docker` to Warp. See [nat gateway](docs/nat-gateway.md) for more information.
 - `WARP_KILL_SWITCH`: If set, will enable a kill switch using nftables that blocks all traffic not going through WARP. This ensures no traffic leaks if WARP disconnects.
+- `WARP_KILL_SWITCH_STRICT`: If set together with `WARP_KILL_SWITCH`, disables automatic local-network (`eth0`/container subnet) allow rules so app traffic can only egress via `CloudflareWARP`. In this mode, `K3S_SERVICE_CIDR` is allowed only for root-owned WARP processes, not for non-root app traffic (for example qBittorrent).
 - `WARP_CLEAR_EXCLUSIONS`: If set, will clear any custom IP exclusions that WARP may have added. Useful for private trackers or services that WARP auto-excludes.
 - `FORCE_IPV4`: If set, will disable IPv6 and force IPv4 preference for all connections. Recommended for environments with IPv6 issues.
 - `K3S_SERVICE_CIDR`: The Kubernetes/k3s service network CIDR to allow through the kill switch (e.g., `10.43.0.0/16`). Only used when `WARP_KILL_SWITCH` is enabled.
 - `KILL_SWITCH_ALLOW_CIDRS`: Comma-separated list of additional CIDRs to allow through the kill switch (e.g., `192.168.1.0/24,10.0.0.0/8`).
 - `WARP_PROTOCOL`: Force a specific tunnel protocol. Accepted values: `WireGuard`, `MASQUE`. Useful for environments where MASQUE has issues (e.g., Oracle Cloud).
+- `WARP_DNS_CHECK_HOST`: DNS hostname used for startup readiness checks (default: `cloudflareclient.com`).
+- `WARP_DNS_WAIT_TIMEOUT`: Max seconds to wait for DNS readiness before startup fails (default: `120`).
+- `WARP_SVC_WAIT_TIMEOUT`: Max seconds to wait for `warp-svc` IPC readiness before startup fails (default: `120`).
+- `WARP_CONNECT_RETRIES`: Number of retries for initial `warp-cli connect` (default: `5`).
+- `WARP_PROTOCOL_SET_MAX_RETRIES`: Number of retries when setting `WARP_PROTOCOL` (default: `30`).
 - `WARP_WATCHDOG`: If set, enables a connection watchdog that monitors WARP connectivity.
 - `WARP_WATCHDOG_INTERVAL`: Watchdog check interval in seconds (default: 30).
+- `WARP_WATCHDOG_MAX_RETRIES`: Number of reconnect attempts per watchdog cycle (default: `5`).
+- `DEBUG_ENABLE_QLOG`: If set, enables WARP qlog debug logging. Disabled by default.
 
 Data persistence: Use the host volume `./data` to persist the data of the WARP client. You can change the location of this directory or use other types of volumes. If you modify the `WARP_LICENSE_KEY`, please delete the `./data` directory so that the client can detect and register again.
 

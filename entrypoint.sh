@@ -3,6 +3,12 @@
 # exit when any command fails
 set -e
 
+WARP_DNS_CHECK_HOST="${WARP_DNS_CHECK_HOST:-cloudflareclient.com}"
+WARP_DNS_WAIT_TIMEOUT="${WARP_DNS_WAIT_TIMEOUT:-120}"
+WARP_SVC_WAIT_TIMEOUT="${WARP_SVC_WAIT_TIMEOUT:-120}"
+WARP_CONNECT_RETRIES="${WARP_CONNECT_RETRIES:-5}"
+WARP_PROTOCOL_SET_MAX_RETRIES="${WARP_PROTOCOL_SET_MAX_RETRIES:-30}"
+
 # create a tun device if not exist
 # allow passing device to ensure compatibility with Podman
 if [ ! -e /dev/net/tun ]; then
@@ -20,7 +26,7 @@ if [ -n "$FORCE_IPV4" ]; then
     sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
     sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
     # Set IPv4 preference for DNS resolution
-    echo "precedence ::ffff:0:0/96 100" > /etc/gai.conf
+    echo "precedence ::ffff:0:0/96 100" | sudo tee /etc/gai.conf >/dev/null
 else
     sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
 fi
@@ -34,7 +40,9 @@ sudo mkdir -p /run/dbus
 if [ -f /run/dbus/pid ]; then
     sudo rm /run/dbus/pid
 fi
-sudo dbus-daemon --config-file=/usr/share/dbus-1/system.conf
+if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
+    sudo dbus-daemon --config-file=/usr/share/dbus-1/system.conf --fork
+fi
 
 # start the daemon
 sudo warp-svc --accept-tos &
@@ -43,17 +51,29 @@ sudo warp-svc --accept-tos &
 sleep "$WARP_SLEEP"
 
 # wait for DNS to be resolvable (k3s CoreDNS may not be ready immediately)
-echo "Waiting for DNS readiness..."
-while ! getent hosts cloudflareclient.com >/dev/null 2>&1; do
+echo "Waiting for DNS readiness (${WARP_DNS_CHECK_HOST})..."
+dns_elapsed=0
+while ! getent hosts "$WARP_DNS_CHECK_HOST" >/dev/null 2>&1; do
+    if [ "$dns_elapsed" -ge "$WARP_DNS_WAIT_TIMEOUT" ]; then
+        echo "ERROR: DNS was not ready after ${WARP_DNS_WAIT_TIMEOUT}s"
+        exit 1
+    fi
     echo "  DNS not ready yet, retrying in 2s..."
     sleep 2
+    dns_elapsed=$((dns_elapsed + 2))
 done
 echo "DNS is ready"
 
 # wait for warp-svc to respond to IPC
 echo "Waiting for warp-svc..."
+svc_elapsed=0
 while ! warp-cli status >/dev/null 2>&1; do
+    if [ "$svc_elapsed" -ge "$WARP_SVC_WAIT_TIMEOUT" ]; then
+        echo "ERROR: warp-svc was not ready after ${WARP_SVC_WAIT_TIMEOUT}s"
+        exit 1
+    fi
     sleep 1
+    svc_elapsed=$((svc_elapsed + 1))
 done
 echo "warp-svc is ready"
 
@@ -92,36 +112,50 @@ if [ -n "$WARP_PROTOCOL" ]; then
     warp-cli --accept-tos disconnect 2>/dev/null || true
     sleep 1
     # retry protocol set in case registration is still finalizing
-    while ! warp-cli tunnel protocol set "$WARP_PROTOCOL" 2>&1; do
+    protocol_set_ok=0
+    for i in $(seq 1 "$WARP_PROTOCOL_SET_MAX_RETRIES"); do
+        if warp-cli tunnel protocol set "$WARP_PROTOCOL" >/dev/null 2>&1; then
+            protocol_set_ok=1
+            break
+        fi
         echo "  Protocol set failed (registration may still be finalizing), retrying in 2s..."
         sleep 2
     done
+    if [ "$protocol_set_ok" -ne 1 ]; then
+        echo "ERROR: failed to set tunnel protocol after ${WARP_PROTOCOL_SET_MAX_RETRIES} attempts"
+        exit 1
+    fi
 fi
 
 # set up kill switch before connecting (blocks non-VPN traffic via nftables)
 if [ -n "$WARP_KILL_SWITCH" ]; then
     echo "[kill-switch] Setting up kill switch..."
+    KILL_SWITCH_STRICT="${WARP_KILL_SWITCH_STRICT:-}"
 
-    # detect local/container networks to whitelist
-    LOCAL_NETS=$(ip --json address | jq -r '
-        .[] |
-        select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
-        .addr_info[] |
-        select(.family == "inet") |
-        "\(.local)/\(.prefixlen)"' | while read -r cidr; do
-            if echo "$cidr" | grep -q "/32$"; then
-                echo "$cidr"
-            else
-                ipcalc -n "$cidr" | grep Network | awk '{print $2}'
-            fi
-        done)
+    if [ -z "$KILL_SWITCH_STRICT" ]; then
+        # detect local/container networks to whitelist
+        LOCAL_NETS=$(ip --json address | jq -r '
+            .[] |
+            select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
+            .addr_info[] |
+            select(.family == "inet") |
+            "\(.local)/\(.prefixlen)"' | while read -r cidr; do
+                if echo "$cidr" | grep -q "/32$"; then
+                    echo "$cidr"
+                else
+                    ipcalc -n "$cidr" | grep Network | awk '{print $2}'
+                fi
+            done)
 
-    LOCAL_NETS6=$(ip --json address | jq -r '
-        .[] |
-        select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
-        .addr_info[] |
-        select(.family == "inet6" and (.scope != "link")) |
-        "\(.local)/\(.prefixlen)"')
+        LOCAL_NETS6=$(ip --json address | jq -r '
+            .[] |
+            select((.ifname != "lo") and (.ifname != "CloudflareWARP")) |
+            .addr_info[] |
+            select(.family == "inet6" and (.scope != "link")) |
+            "\(.local)/\(.prefixlen)"')
+    else
+        echo "[kill-switch] Strict mode enabled: local eth0/container-network bypasses are disabled."
+    fi
 
     sudo nft add table inet kill_switch
 
@@ -131,33 +165,42 @@ if [ -n "$WARP_KILL_SWITCH" ]; then
     sudo nft add rule inet kill_switch output oifname "CloudflareWARP" accept
     # allow warp-svc (root) to reach Cloudflare servers for tunnel establishment
     sudo nft add rule inet kill_switch output meta skuid 0 accept
-    for net in $LOCAL_NETS; do
-        sudo nft add rule inet kill_switch output ip daddr "$net" accept
-    done
-    for net6 in $LOCAL_NETS6; do
-        sudo nft add rule inet kill_switch output ip6 daddr "$net6" accept
-    done
-    # allow IPv6 link-local (NDP, router discovery)
-    sudo nft add rule inet kill_switch output ip6 daddr fe80::/10 accept
+    if [ -z "$KILL_SWITCH_STRICT" ]; then
+        for net in $LOCAL_NETS; do
+            sudo nft add rule inet kill_switch output ip daddr "$net" accept
+        done
+        for net6 in $LOCAL_NETS6; do
+            sudo nft add rule inet kill_switch output ip6 daddr "$net6" accept
+        done
+        # allow IPv6 link-local (NDP, router discovery)
+        sudo nft add rule inet kill_switch output ip6 daddr fe80::/10 accept
+    fi
 
     # forward chain: traffic routed through this container (NAT gateway / sidecar mode)
     sudo nft add chain inet kill_switch forward { type filter hook forward priority 0 \; policy drop \; }
     sudo nft add rule inet kill_switch forward oifname "CloudflareWARP" accept
     sudo nft add rule inet kill_switch forward ct state established,related accept
-    for net in $LOCAL_NETS; do
-        sudo nft add rule inet kill_switch forward ip daddr "$net" accept
-    done
-    for net6 in $LOCAL_NETS6; do
-        sudo nft add rule inet kill_switch forward ip6 daddr "$net6" accept
-    done
-    sudo nft add rule inet kill_switch forward ip6 daddr fe80::/10 accept
+    if [ -z "$KILL_SWITCH_STRICT" ]; then
+        for net in $LOCAL_NETS; do
+            sudo nft add rule inet kill_switch forward ip daddr "$net" accept
+        done
+        for net6 in $LOCAL_NETS6; do
+            sudo nft add rule inet kill_switch forward ip6 daddr "$net6" accept
+        done
+        sudo nft add rule inet kill_switch forward ip6 daddr fe80::/10 accept
+    fi
 
     # K3S/Kubernetes support: add service CIDR to allowed networks
     # Default k3s service CIDR is 10.43.0.0/16
     K3S_SERVICE_CIDR="${K3S_SERVICE_CIDR:-}"
     if [ -n "$K3S_SERVICE_CIDR" ]; then
-        echo "[kill-switch] Adding k3s service CIDR: $K3S_SERVICE_CIDR"
-        sudo nft add rule inet kill_switch output ip daddr "$K3S_SERVICE_CIDR" accept
+        if [ -n "$KILL_SWITCH_STRICT" ]; then
+            echo "[kill-switch] Adding k3s service CIDR for root-only WARP processes: $K3S_SERVICE_CIDR"
+            sudo nft add rule inet kill_switch output meta skuid 0 ip daddr "$K3S_SERVICE_CIDR" accept
+        else
+            echo "[kill-switch] Adding k3s service CIDR: $K3S_SERVICE_CIDR"
+            sudo nft add rule inet kill_switch output ip daddr "$K3S_SERVICE_CIDR" accept
+        fi
         sudo nft add rule inet kill_switch forward ip daddr "$K3S_SERVICE_CIDR" accept
     fi
 
@@ -185,7 +228,19 @@ fi
 
 # connect to WARP
 echo "Connecting to WARP..."
-warp-cli --accept-tos connect
+connected=0
+for i in $(seq 1 "$WARP_CONNECT_RETRIES"); do
+    if warp-cli --accept-tos connect >/dev/null 2>&1; then
+        connected=1
+        break
+    fi
+    echo "  Connect attempt $i/$WARP_CONNECT_RETRIES failed, retrying in 2s..."
+    sleep 2
+done
+if [ "$connected" -ne 1 ]; then
+    echo "ERROR: failed to connect to WARP after ${WARP_CONNECT_RETRIES} attempts"
+    exit 1
+fi
 
 # wait for connection to stabilize
 sleep "$WARP_SLEEP"

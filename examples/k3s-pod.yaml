@@ -94,7 +94,7 @@ spec:
       initContainers:
         - name: load-tun-module
           image: busybox:latest
-          command: ["sh", "-c", "ls -l /dev/net/tun || true"]
+          command: ["sh", "-ec", "[ -c /dev/net/tun ] && ls -l /dev/net/tun"]
           securityContext:
             privileged: true
           volumeMounts:

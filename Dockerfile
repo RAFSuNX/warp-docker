@@ -25,14 +25,11 @@ RUN case ${TARGETPLATFORM} in \
     esac && \
     echo "Building for ${TARGETPLATFORM} with GOST ${GOST_VERSION}" &&\
     apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y curl gnupg lsb-release sudo jq ipcalc && \
+    apt-get install -y --no-install-recommends ca-certificates curl dbus gnupg ipcalc iproute2 jq lsb-release nftables sudo && \
     curl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
-    apt-get install -y cloudflare-warp && \
-    apt-get clean && \
-    apt-get autoremove -y && \
+    apt-get install -y --no-install-recommends cloudflare-warp && \
     MAJOR_VERSION=$(echo ${GOST_VERSION} | cut -d. -f1) && \
     MINOR_VERSION=$(echo ${GOST_VERSION} | cut -d. -f2) && \
     # detect if version >= 2.12.0, which uses new filename syntax
@@ -54,12 +51,17 @@ RUN case ${TARGETPLATFORM} in \
       gunzip ${FILE_NAME} && \
       mv gost-linux-${ARCH}-${GOST_VERSION} /usr/bin/gost; \
     fi && \
+    rm -f ${FILE_NAME} && \
     chmod +x /usr/bin/gost && \
     chmod +x /entrypoint.sh && \
     chmod +x /watchdog.sh && \
     chmod +x /healthcheck/index.sh && \
     useradd -m -s /bin/bash warp && \
-    echo "warp ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/warp
+    echo "warp ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/warp && \
+    chmod 0440 /etc/sudoers.d/warp && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 USER warp
 
@@ -75,6 +77,17 @@ ENV BETA_FIX_HOST_CONNECTIVITY=
 ENV WARP_ENABLE_NAT=
 ENV WARP_PROTOCOL=
 ENV WARP_KILL_SWITCH=
+ENV WARP_KILL_SWITCH_STRICT=
+ENV WARP_CLEAR_EXCLUSIONS=
+ENV FORCE_IPV4=
+ENV K3S_SERVICE_CIDR=
+ENV KILL_SWITCH_ALLOW_CIDRS=
+ENV DEBUG_ENABLE_QLOG=
+ENV WARP_DNS_CHECK_HOST=cloudflareclient.com
+ENV WARP_DNS_WAIT_TIMEOUT=120
+ENV WARP_SVC_WAIT_TIMEOUT=120
+ENV WARP_CONNECT_RETRIES=5
+ENV WARP_PROTOCOL_SET_MAX_RETRIES=30
 ENV WARP_WATCHDOG=
 ENV WARP_WATCHDOG_INTERVAL=30
 ENV WARP_WATCHDOG_MAX_RETRIES=5
