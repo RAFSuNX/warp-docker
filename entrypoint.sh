@@ -13,7 +13,17 @@ fi
 
 # set required sysctls inside the container (avoids needing sysctl in pod spec / compose)
 sudo sysctl -w net.ipv4.conf.all.src_valid_mark=1 2>/dev/null || true
-sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
+
+# IPv6 handling - disable if FORCE_IPV4 is set
+if [ -n "$FORCE_IPV4" ]; then
+    echo "[ipv4] Disabling IPv6 and forcing IPv4 preference..."
+    sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
+    sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
+    # Set IPv4 preference for DNS resolution
+    echo "precedence ::ffff:0:0/96 100" > /etc/gai.conf
+else
+    sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
+fi
 
 # ensure eth0 MTU is large enough for WARP WireGuard (needs >= 1340)
 # Flannel-over-Tailscale can set eth0 to 1230 which is too small
@@ -142,6 +152,34 @@ if [ -n "$WARP_KILL_SWITCH" ]; then
     done
     sudo nft add rule inet kill_switch forward ip6 daddr fe80::/10 accept
 
+    # K3S/Kubernetes support: add service CIDR to allowed networks
+    # Default k3s service CIDR is 10.43.0.0/16
+    K3S_SERVICE_CIDR="${K3S_SERVICE_CIDR:-}"
+    if [ -n "$K3S_SERVICE_CIDR" ]; then
+        echo "[kill-switch] Adding k3s service CIDR: $K3S_SERVICE_CIDR"
+        sudo nft add rule inet kill_switch output ip daddr "$K3S_SERVICE_CIDR" accept
+        sudo nft add rule inet kill_switch forward ip daddr "$K3S_SERVICE_CIDR" accept
+    fi
+
+    # Additional custom CIDRs (comma-separated)
+    if [ -n "$KILL_SWITCH_ALLOW_CIDRS" ]; then
+        echo "[kill-switch] Adding custom allowed CIDRs..."
+        IFS=',' read -ra CIDRS <<< "$KILL_SWITCH_ALLOW_CIDRS"
+        for cidr in "${CIDRS[@]}"; do
+            cidr=$(echo "$cidr" | tr -d ' ')
+            if [ -n "$cidr" ]; then
+                echo "  Adding: $cidr"
+                if echo "$cidr" | grep -q ":"; then
+                    sudo nft add rule inet kill_switch output ip6 daddr "$cidr" accept 2>/dev/null || true
+                    sudo nft add rule inet kill_switch forward ip6 daddr "$cidr" accept 2>/dev/null || true
+                else
+                    sudo nft add rule inet kill_switch output ip daddr "$cidr" accept 2>/dev/null || true
+                    sudo nft add rule inet kill_switch forward ip daddr "$cidr" accept 2>/dev/null || true
+                fi
+            fi
+        done
+    fi
+
     echo "[kill-switch] Kill switch active. Non-VPN traffic blocked."
 fi
 
@@ -151,6 +189,13 @@ warp-cli --accept-tos connect
 
 # wait for connection to stabilize
 sleep "$WARP_SLEEP"
+
+# Clear IP exclusions if requested (useful for private trackers that WARP auto-excludes)
+if [ -n "$WARP_CLEAR_EXCLUSIONS" ]; then
+    echo "[exclusions] Clearing custom IP exclusions..."
+    warp-cli tunnel ip reset 2>/dev/null || true
+    echo "[exclusions] IP exclusions cleared"
+fi
 
 # disable qlog if DEBUG_ENABLE_QLOG is empty
 if [ -z "$DEBUG_ENABLE_QLOG" ]; then
@@ -178,12 +223,17 @@ if [ -n "$WARP_ENABLE_NAT" ]; then
     sudo nft add chain ip mangle forward { type filter hook forward priority mangle \; }
     sudo nft add rule ip mangle forward tcp flags syn tcp option maxseg size set rt mtu
 
-    sudo nft add table ip6 nat
-    sudo nft add chain ip6 nat WARP_NAT { type nat hook postrouting priority 100 \; }
-    sudo nft add rule ip6 nat WARP_NAT oifname "CloudflareWARP" masquerade
-    sudo nft add table ip6 mangle
-    sudo nft add chain ip6 mangle forward { type filter hook forward priority mangle \; }
-    sudo nft add rule ip6 mangle forward tcp flags syn tcp option maxseg size set rt mtu
+    # Only add IPv6 NAT if not forcing IPv4
+    if [ -z "$FORCE_IPV4" ]; then
+        sudo nft add table ip6 nat
+        sudo nft add chain ip6 nat WARP_NAT { type nat hook postrouting priority 100 \; }
+        sudo nft add rule ip6 nat WARP_NAT oifname "CloudflareWARP" masquerade
+        sudo nft add table ip6 mangle
+        sudo nft add chain ip6 mangle forward { type filter hook forward priority mangle \; }
+        sudo nft add rule ip6 mangle forward tcp flags syn tcp option maxseg size set rt mtu
+    fi
+
+    echo "[NAT] NAT enabled"
 fi
 
 # start watchdog if enabled
@@ -191,6 +241,26 @@ if [ -n "$WARP_WATCHDOG" ]; then
     /watchdog.sh &
     echo "[watchdog] Connection watchdog started (interval: ${WARP_WATCHDOG_INTERVAL:-30}s)"
 fi
+
+# Print connection info
+echo ""
+echo "========================================="
+echo "WARP Docker Ready!"
+echo "========================================="
+warp-cli status 2>/dev/null || true
+echo ""
+if [ -n "$WARP_ENABLE_NAT" ]; then
+    echo "NAT Mode: Enabled"
+fi
+if [ -n "$WARP_KILL_SWITCH" ]; then
+    echo "Kill Switch: Active"
+fi
+if [ -n "$FORCE_IPV4" ]; then
+    echo "IPv4 Only: Yes"
+fi
+echo "SOCKS5/HTTP Proxy: 0.0.0.0:1080"
+echo "========================================="
+echo ""
 
 # start the proxy
 gost $GOST_ARGS

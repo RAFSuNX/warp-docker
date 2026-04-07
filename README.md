@@ -65,6 +65,14 @@ You can configure the container through the following environment variables:
 - `REGISTER_WHEN_MDM_EXISTS`: If set, will register consumer account (WARP or WARP+, in contrast to Zero Trust) even when `mdm.xml` exists. You usually don't need this, as `mdm.xml` are usually used for Zero Trust. However, some users may want to adjust advanced settings in `mdm.xml` while still using consumer account.
 - `BETA_FIX_HOST_CONNECTIVITY`: If set, will add checks for host connectivity into healthchecks and automatically fix it if necessary. See [host connectivity issue](docs/host-connectivity.md) for more information.
 - `WARP_ENABLE_NAT`: If set, will work as warp mode and turn NAT on. You can route L3 traffic through `warp-docker` to Warp. See [nat gateway](docs/nat-gateway.md) for more information.
+- `WARP_KILL_SWITCH`: If set, will enable a kill switch using nftables that blocks all traffic not going through WARP. This ensures no traffic leaks if WARP disconnects.
+- `WARP_CLEAR_EXCLUSIONS`: If set, will clear any custom IP exclusions that WARP may have added. Useful for private trackers or services that WARP auto-excludes.
+- `FORCE_IPV4`: If set, will disable IPv6 and force IPv4 preference for all connections. Recommended for environments with IPv6 issues.
+- `K3S_SERVICE_CIDR`: The Kubernetes/k3s service network CIDR to allow through the kill switch (e.g., `10.43.0.0/16`). Only used when `WARP_KILL_SWITCH` is enabled.
+- `KILL_SWITCH_ALLOW_CIDRS`: Comma-separated list of additional CIDRs to allow through the kill switch (e.g., `192.168.1.0/24,10.0.0.0/8`).
+- `WARP_PROTOCOL`: Force a specific tunnel protocol. Accepted values: `WireGuard`, `MASQUE`. Useful for environments where MASQUE has issues (e.g., Oracle Cloud).
+- `WARP_WATCHDOG`: If set, enables a connection watchdog that monitors WARP connectivity.
+- `WARP_WATCHDOG_INTERVAL`: Watchdog check interval in seconds (default: 30).
 
 Data persistence: Use the host volume `./data` to persist the data of the WARP client. You can change the location of this directory or use other types of volumes. If you modify the `WARP_LICENSE_KEY`, please delete the `./data` directory so that the client can detect and register again.
 
@@ -106,6 +114,70 @@ If you want to build your own image:
 This will build the image with the latest version of WARP client and GOST and push it to GitHub Container Registry. You can also specify the version of GOST by giving input to the workflow. Building image with custom WARP client version is not supported yet.
 
 If you want to build the image locally, you can use [`.github/workflows/build-publish.yml`](.github/workflows/build-publish.yml) as a reference.
+
+## Kubernetes / k3s Usage
+
+warp-docker works great as a sidecar container in Kubernetes/k3s to route pod traffic through WARP. Here's an example deployment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-with-warp
+spec:
+  template:
+    spec:
+      containers:
+      - name: warp
+        image: ghcr.io/rafsunx/warp-docker:latest
+        env:
+        - name: WARP_ENABLE_NAT
+          value: "1"
+        - name: WARP_KILL_SWITCH
+          value: "1"
+        - name: FORCE_IPV4
+          value: "1"
+        - name: K3S_SERVICE_CIDR
+          value: "10.43.0.0/16"
+        - name: WARP_CLEAR_EXCLUSIONS
+          value: "1"
+        - name: WARP_SLEEP
+          value: "5"
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - NET_ADMIN
+        ports:
+        - containerPort: 8080  # Your app's port
+        - containerPort: 1080  # SOCKS5 proxy
+        volumeMounts:
+        - mountPath: /var/lib/cloudflare-warp
+          name: warp-data
+        - mountPath: /dev/net/tun
+          name: tun-device
+      - name: your-app
+        image: your-app:latest
+        # App uses shared network namespace with warp container
+      volumes:
+      - name: warp-data
+        persistentVolumeClaim:
+          claimName: warp-state
+      - name: tun-device
+        hostPath:
+          path: /dev/net/tun
+          type: CharDevice
+```
+
+### Key Points for Kubernetes:
+
+1. **Privileged mode**: Required for WARP to create the tunnel interface and set up nftables rules.
+2. **NET_ADMIN capability**: Needed for network configuration.
+3. **Kill switch**: Use `WARP_KILL_SWITCH=1` to prevent traffic leaks.
+4. **K3S service CIDR**: Set `K3S_SERVICE_CIDR` to allow access to Kubernetes services (default k3s: `10.43.0.0/16`).
+5. **IPv4 only**: Use `FORCE_IPV4=1` if you have IPv6 connectivity issues.
+6. **Clear exclusions**: Use `WARP_CLEAR_EXCLUSIONS=1` to ensure all traffic goes through WARP.
+7. **Persistent storage**: Mount `/var/lib/cloudflare-warp` to persist WARP registration.
 
 ## Common problems
 

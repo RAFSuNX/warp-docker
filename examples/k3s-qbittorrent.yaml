@@ -1,0 +1,165 @@
+# Example: qBittorrent with WARP sidecar for k3s
+# All qBittorrent traffic is routed through Cloudflare WARP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qbittorrent-config
+  namespace: media
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: warp-state
+  namespace: media
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qbittorrent-warp
+  namespace: media
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qbittorrent-warp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: qbittorrent-warp
+    spec:
+      containers:
+      # WARP sidecar - handles all networking
+      - name: warp
+        image: ghcr.io/rafsunx/warp-docker:latest
+        imagePullPolicy: Always
+        env:
+        - name: WARP_ENABLE_NAT
+          value: "1"
+        - name: WARP_KILL_SWITCH
+          value: "1"
+        - name: FORCE_IPV4
+          value: "1"
+        - name: K3S_SERVICE_CIDR
+          value: "10.43.0.0/16"
+        - name: WARP_CLEAR_EXCLUSIONS
+          value: "1"
+        - name: WARP_SLEEP
+          value: "5"
+        - name: WARP_PROTOCOL
+          value: "WireGuard"
+        - name: TZ
+          value: UTC
+        # Expose ports on WARP container (shared network namespace)
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 6881
+          name: torrent-tcp
+          protocol: TCP
+        - containerPort: 6881
+          name: torrent-udp
+          protocol: UDP
+        - containerPort: 1080
+          name: socks5
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - NET_ADMIN
+        volumeMounts:
+        - mountPath: /var/lib/cloudflare-warp
+          name: warp-data
+        - mountPath: /dev/net/tun
+          name: tun-device
+        livenessProbe:
+          exec:
+            command: ["/healthcheck/index.sh"]
+          initialDelaySeconds: 90
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 10
+      # qBittorrent - uses WARP's network
+      - name: qbittorrent
+        image: linuxserver/qbittorrent:latest
+        imagePullPolicy: Always
+        env:
+        - name: PUID
+          value: "1000"
+        - name: PGID
+          value: "1000"
+        - name: TZ
+          value: UTC
+        - name: WEBUI_PORT
+          value: "8080"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+        volumeMounts:
+        - mountPath: /config
+          name: config
+        - mountPath: /downloads
+          name: downloads
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: qbittorrent-config
+      - name: warp-data
+        persistentVolumeClaim:
+          claimName: warp-state
+      - name: tun-device
+        hostPath:
+          path: /dev/net/tun
+          type: CharDevice
+      - name: downloads
+        hostPath:
+          path: /mnt/storage/Downloads
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent-warp
+  namespace: media
+spec:
+  selector:
+    app: qbittorrent-warp
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: torrent-tcp
+    port: 6881
+    targetPort: 6881
+    protocol: TCP
+  - name: torrent-udp
+    port: 6881
+    targetPort: 6881
+    protocol: UDP
